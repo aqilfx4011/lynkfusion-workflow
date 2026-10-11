@@ -1,0 +1,1582 @@
+{
+  "name": "LynkFusion — Groq Workflow Audited v2 (Cost-Safe)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "841009e7-e15e-4995-b859-39dcebfd7a5b",
+      "name": "Start LynkFusion Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-run-mode",
+              "name": "run_mode",
+              "value": "simulation",
+              "type": "string"
+            },
+            {
+              "id": "cfg-primary-ai",
+              "name": "primary_ai",
+              "value": "groq",
+              "type": "string"
+            },
+            {
+              "id": "cfg-secondary-ai",
+              "name": "secondary_ai",
+              "value": "claude",
+              "type": "string"
+            },
+            {
+              "id": "cfg-claude-review",
+              "name": "enable_claude_review",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "cfg-max-ideas",
+              "name": "max_ideas",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "cfg-max-ai-calls",
+              "name": "max_ai_calls_per_execution",
+              "value": 2,
+              "type": "number"
+            },
+            {
+              "id": "cfg-max-retries",
+              "name": "max_retries",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "id": "cfg-human-approval",
+              "name": "require_human_approval",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "cfg-auto-publish",
+              "name": "auto_publish",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "cfg-currency",
+              "name": "currency",
+              "value": "IDR",
+              "type": "string"
+            },
+            {
+              "id": "cfg-min-price",
+              "name": "min_price",
+              "value": 19000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-max-price",
+              "name": "max_price",
+              "value": 149000,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ae102211-c7ea-47e3-af1c-1b3feeee38f0",
+      "name": "Configuration",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        272,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validates the central configuration and plans the AI-call budget up front.\n// The system never switches AI providers and never exceeds max_ai_calls_per_execution.\nconst c = $input.first().json;\nconst errors = [];\nconst warnings = [];\n\nconst runMode = String(c.run_mode || '').toLowerCase().trim();\nif (runMode !== 'simulation' && runMode !== 'live') errors.push('run_mode must be \"simulation\" or \"live\" (got \"' + c.run_mode + '\").');\nif (String(c.primary_ai || '').toLowerCase() !== 'groq') errors.push('primary_ai must be \"groq\" for the Groq Chat Completions route. The system will not switch providers silently.');\nif (String(c.secondary_ai || '').toLowerCase() !== 'claude') errors.push('secondary_ai must be \"claude\". No other reviewer is wired and the system will not switch providers silently.');\n\nconst maxIdeas = Number(c.max_ideas);\nif (!Number.isInteger(maxIdeas) || maxIdeas < 1 || maxIdeas > 5) errors.push('max_ideas must be an integer between 1 and 5.');\nconst maxCalls = Number(c.max_ai_calls_per_execution);\nif (!Number.isInteger(maxCalls) || maxCalls < 0) errors.push('max_ai_calls_per_execution must be a non-negative integer.');\nconst maxRetries = Number(c.max_retries);\nif (maxRetries !== 0) warnings.push('max_retries is ' + c.max_retries + ', but AI nodes have retries disabled; 0 retries will be used.');\nconst minPrice = Number(c.min_price);\nconst maxPrice = Number(c.max_price);\nif (!(minPrice > 0) || !(maxPrice > 0) || minPrice >= maxPrice) errors.push('min_price and max_price must be positive numbers with min_price < max_price.');\nif (String(c.currency || '').toUpperCase() !== 'IDR') errors.push('currency must be \"IDR\".');\nif (c.require_human_approval !== true) errors.push('require_human_approval must stay true. Publishing without owner approval is not allowed.');\nif (c.auto_publish !== false) errors.push('auto_publish must stay false. No publishing integration exists yet.');\n\n// AI-call budget plan (deterministic, decided before any call is made)\nconst live = runMode === 'live';\nconst plan = { idea_generation: false, product_creation: false, claude_review: false, final_revision: false };\nif (live && Number.isInteger(maxCalls)) {\n  if (maxCalls < 2) {\n    errors.push('Live mode needs at least 2 AI calls (Groq idea generation + Groq product creation); max_ai_calls_per_execution is ' + maxCalls + '.');\n  } else {\n    plan.idea_generation = true;\n    plan.product_creation = true;\n  }\n  if (c.enable_claude_review === true && plan.product_creation) {\n    if (maxCalls >= 3) plan.claude_review = true;\n    else warnings.push('Claude review is enabled but will be SKIPPED: it needs a 3rd AI call and max_ai_calls_per_execution is ' + maxCalls + '.');\n    if (plan.claude_review) {\n      if (maxCalls >= 4) plan.final_revision = true;\n      else warnings.push('OpenAI final revision after Claude review will be skipped: it needs a 4th AI call and max_ai_calls_per_execution is ' + maxCalls + '.');\n    }\n  }\n}\nconst plannedCalls = Object.keys(plan).filter(function (k) { return plan[k]; }).length;\n\nreturn [{ json: {\n  config: {\n    run_mode: runMode,\n    primary_ai: 'groq',\n    secondary_ai: 'claude',\n    enable_claude_review: c.enable_claude_review === true,\n    max_ideas: maxIdeas,\n    max_ai_calls_per_execution: maxCalls,\n    max_retries: 0,\n    require_human_approval: true,\n    auto_publish: false,\n    currency: 'IDR',\n    min_price: minPrice,\n    max_price: maxPrice,\n  },\n  config_valid: errors.length === 0,\n  config_errors: errors,\n  config_warnings: warnings,\n  ai_plan: plan,\n  max_planned_ai_calls: plannedCalls,\n  run_started_at: new Date().toISOString(),\n} }];"
+      },
+      "id": "7e673f5d-fc3e-475d-adfc-5db909f87378",
+      "name": "Validate Configuration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cfg-valid",
+              "leftValue": "={{ $json.config_valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5cf21422-4ac8-4095-92c9-7ab225c71a7a",
+      "name": "Config Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "2cHI9ktMoythWfzu",
+          "cachedResultName": "lynkfusion_products"
+        },
+        "returnAll": true
+      },
+      "id": "43e12abe-d03d-4b22-bf28-96aff563e0d2",
+      "name": "Load Existing Products",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        288
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collects stored product records. Simulation-mode rows are never treated as real products.\n// In simulation mode an explicit, clearly labelled SAMPLE list is added for duplicate testing.\nconst cfg = $('Validate Configuration').first().json.config;\nconst rows = [];\nlet loadError = null;\nfor (const it of $input.all()) {\n  const j = it.json || {};\n  if (j.error) { loadError = typeof j.error === 'string' ? j.error : (j.error.message || JSON.stringify(j.error)); continue; }\n  if (Object.keys(j).length === 0) continue;\n  rows.push(j);\n}\nconst liveRows = rows.filter(function (r) { return r.run_mode === 'live' && r.product_status !== 'rejected_qa'; });\nlet records = liveRows.map(function (r) { return { title: r.product_title || '', product_key: r.product_key || '', status: r.product_status || '', source: 'data_table' }; });\n\nlet sampleUsed = false;\nif (cfg.run_mode === 'simulation') {\n  const samples = [\n    'Template Invoice & Pembukuan Sederhana untuk UMKM',\n    'Ebook Panduan Jualan di TikTok Shop untuk Pemula',\n    'Planner Keuangan Keluarga Bulanan (Google Sheets)',\n    'Kumpulan Template Caption Instagram untuk Bisnis Kuliner',\n  ];\n  records = records.concat(samples.map(function (t) { return { title: t, product_key: '', status: 'sample', source: 'sample' }; }));\n  sampleUsed = true;\n}\n\nlet recordSource;\nif (loadError) recordSource = sampleUsed ? 'sample_records_only (data table load failed)' : 'none (data table load failed)';\nelse if (liveRows.length === 0 && sampleUsed) recordSource = 'sample_records_only';\nelse if (liveRows.length > 0 && sampleUsed) recordSource = 'data_table_live_records_plus_sample_records';\nelse recordSource = liveRows.length > 0 ? 'data_table_live_records' : 'data_table_empty';\n\nreturn [{ json: {\n  existing_records: records,\n  record_source: recordSource,\n  data_table_rows_loaded: rows.length,\n  live_records_used: liveRows.length,\n  simulation_or_rejected_rows_ignored: rows.length - liveRows.length,\n  sample_records_used: sampleUsed,\n  load_error: loadError,\n} }];"
+      },
+      "id": "280f110c-a7d4-4e2a-9cb6-714cae78385a",
+      "name": "Prepare Existing Records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "live-ideas",
+              "leftValue": "={{ $('Validate Configuration').first().json.ai_plan.idea_generation }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "790c4746-592a-4834-8c2b-975ec22c048b",
+      "name": "Live Mode for Ideas?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1248,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ ({\n  model: \"openai/gpt-oss-20b\",\n  messages: [\n    { role: \"system\", content: \"You are a product strategist for LynkFusion, an Indonesian digital-product business. Propose useful digital-product ideas only. Never invent search results, sales figures, demand statistics, testimonials, or guarantees. Respond with valid JSON only.\" },\n    { role: \"user\", content:\n      \"Propose exactly \" + $('Validate Configuration').first().json.config.max_ideas + \" specific digital product ideas for Indonesian customers. Each product must be deliverable as downloadable digital files (templates, workbooks, checklists, guides, spreadsheets) and solve a concrete problem. Write all content in Bahasa Indonesia.\\n\" +\n      \"Suggested price per idea must be an integer between \" + $('Validate Configuration').first().json.config.min_price + \" and \" + $('Validate Configuration').first().json.config.max_price + \" IDR.\\n\" +\n      \"Do not propose ideas that duplicate or closely resemble these existing products: \" + ($('Prepare Existing Records').first().json.existing_records.map(r => r.title).join('; ') || 'none') + \".\\n\" +\n      \"Return a JSON object with an ideas array. Each idea must have these keys: title, target_audience, customer_problem, proposed_solution, differentiation, suggested_price_idr (integer), and rationale. The rationale must explain reasoning only, without invented statistics or claims of validated demand.\"\n    }\n  ],\n  response_format: { type: \"json_object\" },\n  reasoning_effort: \"low\",\n  max_completion_tokens: 1800,\n  stream: false\n}) }}",
+        "options": {}
+      },
+      "id": "758bd796-6f27-49fe-8acf-5d4682954cf8",
+      "name": "Groq Generate Ideas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1472,
+        192
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parses the Groq Chat Completions result without making another API call.\nconst cfg = $('Validate Configuration').first().json.config;\nconst j = $input.first().json || {};\nfunction errMsg(e) {\n  if (!e) return 'unknown API error';\n  if (typeof e === 'string') return e;\n  if (e.message) return e.message;\n  if (e.error && e.error.message) return e.error.message;\n  try { return JSON.stringify(e); } catch (_) { return String(e); }\n}\nfunction apiError(r) {\n  if (r.errorMessage) return String(r.errorMessage) + (r.errorDescription ? ': ' + r.errorDescription : '');\n  if (r.error) return errMsg(r.error);\n  if (Number(r.statusCode || r.status) >= 400) return 'HTTP ' + (r.statusCode || r.status) + ': ' + errMsg(r);\n  // n8n may wrap a failed HTTP Request as a root-level NodeApiError item.\n  if (!Array.isArray(r.choices) && typeof r.message === 'string' && (r.name || r.description || r.context || r.cause)) {\n    return String(r.name || 'Request error') + ': ' + r.message + (r.description ? ' — ' + r.description : '');\n  }\n  return null;\n}\nfunction extractText(r) {\n  if (typeof r.output_text === 'string') return r.output_text;\n  const choices = Array.isArray(r.choices) ? r.choices : (r.data && Array.isArray(r.data.choices) ? r.data.choices : []);\n  if (choices.length && choices[0].message) {\n    const c = choices[0].message.content;\n    if (typeof c === 'string') return c;\n    if (Array.isArray(c)) return c.map(x => typeof x === 'string' ? x : (x.text || x.content || '')).join('\\n');\n  }\n  const out = Array.isArray(r.output) ? r.output : [];\n  for (const m of out) {\n    if (m && Array.isArray(m.content)) {\n      const part = m.content.find(x => x && (x.text !== undefined || x.output_text !== undefined));\n      if (part) return String(part.text !== undefined ? part.text : part.output_text);\n    }\n  }\n  return null;\n}\nfunction parseJson(text) {\n  if (text && typeof text === 'object') return text;\n  let s = String(text || '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '');\n  try { return JSON.parse(s); } catch (_) {}\n  const a = s.indexOf('{'), b = s.lastIndexOf('}');\n  if (a < 0 || b <= a) throw new Error('Model returned no JSON object.');\n  return JSON.parse(s.slice(a, b + 1));\n}\nlet ideas = [], status = '', calls = 1;\nconst errors = [];\nconst problem = apiError(j);\nif (problem) {\n  status = 'failed: Groq Chat Completions request: ' + problem;\n  errors.push(status);\n} else {\n  try {\n    const text = extractText(j);\n    if (text === null) throw new Error('No choices[0].message.content found. Response keys: ' + Object.keys(j).join(', '));\n    const parsed = parseJson(text);\n    const raw = Array.isArray(parsed.ideas) ? parsed.ideas : [];\n    ideas = raw.slice(0, Number(cfg.max_ideas) || 1).map(i => ({\n      title: String(i.title || '').trim(),\n      target_audience: String(i.target_audience || '').trim(),\n      customer_problem: String(i.customer_problem || '').trim(),\n      proposed_solution: String(i.proposed_solution || '').trim(),\n      differentiation: String(i.differentiation || '').trim(),\n      suggested_price_idr: Math.round(Number(String(i.suggested_price_idr || '').replace(/[^0-9]/g, '')) || 0),\n      rationale: String(i.rationale || '').trim(),\n    })).filter(i => i.title.length > 0);\n    status = ideas.length ? 'completed: Groq returned ' + ideas.length + ' idea(s)' : 'failed: Groq returned no usable ideas';\n    if (!ideas.length) errors.push('Groq returned no usable ideas in JSON key \"ideas\".');\n  } catch (e) {\n    status = 'failed: Groq idea response parsing: ' + errMsg(e);\n    errors.push(status);\n  }\n}\nreturn [{ json: { ideas, idea_source: 'groq', openai_status_ideas: status, ai_calls_ideas: calls, idea_errors: errors } }];"
+      },
+      "id": "c807266d-c1b1-4729-9553-b6ce2cba24fc",
+      "name": "Parse AI Ideas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1696,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalizes titles and compares each idea with existing records and with earlier ideas in this batch.\n// exact normalized match => rejected; token similarity >= 0.6 => close match flagged for review.\nconst input = $input.first().json;\nconst existing = $('Prepare Existing Records').first().json;\nconst STOP = ['untuk', 'dan', 'di', 'ke', 'dari', 'yang', 'dengan', 'the', 'for', 'and', 'of', 'a', 'an', 'lengkap', 'paket', 'kit'];\nfunction norm(t) { return String(t || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9 ]+/g, ' ').replace(/ +/g, ' ').trim(); }\nfunction tokens(t) { return norm(t).split(' ').filter(function (w) { return w && STOP.indexOf(w) === -1; }); }\nfunction similarity(a, b) {\n  const A = tokens(a); const B = tokens(b);\n  if (A.length === 0 || B.length === 0) return 0;\n  const setB = {}; B.forEach(function (w) { setB[w] = true; });\n  const setA = {}; A.forEach(function (w) { setA[w] = true; });\n  let inter = 0; Object.keys(setA).forEach(function (w) { if (setB[w]) inter++; });\n  const union = Object.keys(Object.assign({}, setA, setB)).length;\n  return union === 0 ? 0 : inter / union;\n}\n\nconst records = existing.existing_records || [];\nconst seen = [];\nlet rejected = 0;\nlet flagged = 0;\nconst annotated = (input.ideas || []).map(function (idea) {\n  const n = norm(idea.title);\n  let status = 'unique';\n  let matchedTitle = null;\n  let matchedSource = null;\n  let best = 0;\n  const pool = records.map(function (r) { return { title: r.title, source: r.source }; }).concat(seen.map(function (t) { return { title: t, source: 'same_batch' }; }));\n  for (const r of pool) {\n    if (norm(r.title) === n) { status = 'exact_duplicate'; matchedTitle = r.title; matchedSource = r.source; best = 1; break; }\n    const s = similarity(idea.title, r.title);\n    if (s > best) { best = s; if (s >= 0.6) { status = 'close_match'; matchedTitle = r.title; matchedSource = r.source; } }\n  }\n  if (status === 'exact_duplicate') rejected++;\n  if (status === 'close_match') flagged++;\n  seen.push(idea.title);\n  return Object.assign({}, idea, {\n    normalized_title: n,\n    duplicate_status: status,\n    duplicate_similarity: Math.round(best * 100) / 100,\n    matched_title: matchedTitle,\n    matched_source: matchedSource,\n  });\n});\n\nreturn [{ json: {\n  ideas: annotated,\n  ideas_generated: annotated.length,\n  duplicates_rejected: rejected,\n  close_matches_flagged: flagged,\n  record_source: existing.record_source,\n  duplicate_check_note: existing.sample_records_used && existing.live_records_used === 0\n    ? 'Only SAMPLE records were available; duplicate detection was not checked against real stored products.'\n    : 'Checked against ' + existing.live_records_used + ' stored live product record(s)' + (existing.sample_records_used ? ' plus sample records.' : '.'),\n  idea_source: input.idea_source,\n  openai_status_ideas: input.openai_status_ideas,\n  ai_calls_ideas: input.ai_calls_ideas,\n  idea_errors: input.idea_errors || [],\n} }];"
+      },
+      "id": "adffbe26-05af-4722-b403-960668edd154",
+      "name": "Detect Duplicates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deterministic 0-100 score: five criteria worth 0-20 each, computed only from the idea text.\n// usefulness: problem detail (8 + 4), concrete deliverable named (4), solution detail (4)\n// audience_clarity: audience given (6), detailed (6), specific segment named (8)\n// differentiation: given and detailed (8 + 4), local fit (4), no unsupported superlatives (4)\n// feasibility: digital file format (10), reasonable scope (5), no ongoing service or custom software (5)\n// commercial_potential: price in range (8), rationale given (4), money/time/career outcome (4), paying audience (4)\n// penalty: close match to an existing product -10. Exact duplicates are excluded. Minimum to select: 50.\nconst input = $input.first().json;\nconst cfg = $('Validate Configuration').first().json.config;\nconst MIN_SCORE = 50;\nfunction has(text, words) { const t = String(text || '').toLowerCase(); return words.some(function (w) { return t.indexOf(w) !== -1; }); }\nconst DELIVERABLE = ['template', 'checklist', 'panduan', 'workbook', 'sop', 'script', 'planner', 'worksheet', 'lembar', 'contoh', 'modul', 'kalkulator', 'spreadsheet', 'tracker', 'ebook'];\nconst SEGMENT = ['pemula', 'pemilik', 'mahasiswa', 'fresh graduate', 'ibu', 'freelancer', 'umkm', 'admin', 'guru', 'karyawan', 'online shop', 'kreator', 'panitia', 'organisasi', 'reseller', 'pelajar'];\nconst LOCAL = ['indonesia', 'lokal', 'rupiah', 'shopee', 'tokopedia', 'tiktok shop', 'whatsapp', 'qris', 'kampus'];\nconst SUPERLATIVE = ['terbaik', 'nomor 1', 'no. 1', 'paling laris', 'terlaris', 'dijamin', 'pasti'];\nconst FORMAT = ['template', 'ebook', 'checklist', 'notion', 'google sheets', 'spreadsheet', 'pdf', 'workbook', 'canva', 'google docs', 'docs'];\nconst HEAVY = ['coaching 1-on-1', 'mentoring langsung', 'aplikasi custom', 'software custom', 'jasa', 'kelas live'];\nconst OUTCOME = ['uang', 'waktu', 'omzet', 'kerja', 'pelanggan', 'penjualan', 'hemat', 'gaji', 'karier', 'pesanan', 'sponsor', 'untung', 'rugi'];\nconst PAYING = ['pemilik', 'bisnis', 'umkm', 'freelancer', 'online shop', 'profesional', 'karyawan', 'fresh graduate', 'panitia'];\n\nfunction score(i) {\n  const b = { usefulness: 0, audience_clarity: 0, differentiation: 0, feasibility: 0, commercial_potential: 0, close_match_penalty: 0 };\n  const prob = i.customer_problem || ''; const sol = i.proposed_solution || ''; const aud = i.target_audience || ''; const diff = i.differentiation || '';\n  if (prob.length >= 40) b.usefulness += 8;\n  if (prob.length >= 80) b.usefulness += 4;\n  if (has(sol, DELIVERABLE)) b.usefulness += 4;\n  if (sol.length >= 80) b.usefulness += 4;\n  if (aud.length > 0) b.audience_clarity += 6;\n  if (aud.length >= 25) b.audience_clarity += 6;\n  if (has(aud, SEGMENT)) b.audience_clarity += 8;\n  if (diff.length >= 30) b.differentiation += 8;\n  if (diff.length >= 80) b.differentiation += 4;\n  if (has(diff, LOCAL)) b.differentiation += 4;\n  if (!has(diff, SUPERLATIVE)) b.differentiation += 4;\n  if (has(sol, FORMAT)) b.feasibility += 10;\n  if (sol.length >= 40 && sol.length <= 600) b.feasibility += 5;\n  if (!has(sol, HEAVY)) b.feasibility += 5;\n  const price = Number(i.suggested_price_idr) || 0;\n  if (price >= cfg.min_price && price <= cfg.max_price) b.commercial_potential += 8;\n  if ((i.rationale || '').length >= 40) b.commercial_potential += 4;\n  if (has(prob + ' ' + sol, OUTCOME)) b.commercial_potential += 4;\n  if (has(aud, PAYING)) b.commercial_potential += 4;\n  if (i.duplicate_status === 'close_match') b.close_match_penalty = -10;\n  const total = Math.max(0, Math.min(100, b.usefulness + b.audience_clarity + b.differentiation + b.feasibility + b.commercial_potential + b.close_match_penalty));\n  return { total: total, breakdown: b };\n}\n\nconst ranked = (input.ideas || []).map(function (i, idx) {\n  const s = score(i);\n  return Object.assign({}, i, { score: s.total, score_breakdown: s.breakdown, eligible: i.duplicate_status !== 'exact_duplicate' && s.total >= MIN_SCORE, original_index: idx });\n}).sort(function (a, b) { return b.score - a.score || a.original_index - b.original_index; });\n\nconst selected = ranked.find(function (i) { return i.eligible; }) || null;\nconst errors = (input.idea_errors || []).slice();\nif (!selected) errors.push(ranked.length === 0 ? 'No ideas were available to score.' : 'No idea passed duplicate checks with a score of at least ' + MIN_SCORE + '.');\n\nreturn [{ json: Object.assign({}, input, {\n  scoring_method: 'Deterministic rule-based score (0-100): usefulness, audience_clarity, differentiation, feasibility, commercial_potential at 0-20 each, minus 10 for close matches. Exact duplicates excluded; minimum ' + MIN_SCORE + ' to be selected. The AI does not set the score.',\n  ranked_ideas: ranked.map(function (i) { return { title: i.title, score: i.score, score_breakdown: i.score_breakdown, duplicate_status: i.duplicate_status, eligible: i.eligible }; }),\n  has_valid_candidate: selected !== null,\n  selected_idea: selected,\n  selected_score: selected ? selected.score : null,\n  selected_score_breakdown: selected ? selected.score_breakdown : null,\n  idea_errors: errors,\n}) }];"
+      },
+      "id": "10a6cc6f-0549-4a60-8bcd-5655a4e258e5",
+      "name": "Score & Select Idea",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2144,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-candidate",
+              "leftValue": "={{ $json.has_valid_candidate }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d2c7ad25-6155-4ca8-aed4-eacb504bb5fe",
+      "name": "Valid Candidate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2368,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "live-product",
+              "leftValue": "={{ $('Validate Configuration').first().json.ai_plan.product_creation }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0d33951d-94b3-4619-b7b6-c71b26672c69",
+      "name": "Live Mode for Product?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2992,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ ({\n  model: \"openai/gpt-oss-20b\",\n  messages: [\n    { role: \"system\", content: \"You create genuinely useful digital products for Indonesian customers. Describe the actual content a buyer receives, not empty headings. Never include guarantees, fake testimonials, sales figures, demand statistics, fabricated citations, or unsupported claims. Respond with valid JSON only.\" },\n    { role: \"user\", content:\n      \"Create a complete buyer-ready digital product draft from this selected idea: \" + JSON.stringify($('Score & Select Idea').first().json.selected_idea) + \"\\n\" +\n      \"Write in Bahasa Indonesia. Provide at least 3 specific customer benefits; at least 2 fully described deliverables (name, format, concrete details); at least 4 outline sections with at least 3 concrete items each; product description at least 150 characters; sales-copy body at least 150 characters; suggested price must be an integer between \" + $('Validate Configuration').first().json.config.min_price + \" and \" + $('Validate Configuration').first().json.config.max_price + \" IDR; include a pricing rationale without claims of validated demand.\\n\" +\n      \"Also create product_content for the actual downloadable material: introduction of at least 100 characters; at least 4 fully written chapters with useful explanations and concrete steps/examples (aim for 120-180 words per chapter so the result fits the output limit); at least 2 reusable templates or worksheets with fields and instructions; and usage_instructions of at least 100 characters. The content must be specific to the selected product and useful without the buyer needing to invent the material.\\n\" +\n      \"Return one JSON object with these keys: title, subtitle, description, target_audience, customer_benefits (array of strings), deliverables (array of objects with name, format, details), outline (array of objects with section and contents array), product_content (object with introduction, chapters array of title/content objects, templates array of name/content objects, usage_instructions), suggested_price_idr (integer), pricing_rationale, and sales_copy (object with headline, body, bullet_points array, call_to_action).\"\n    }\n  ],\n  response_format: { type: \"json_object\" },\n  reasoning_effort: \"low\",\n  max_completion_tokens: 4000,\n  stream: false\n}) }}",
+        "options": {}
+      },
+      "id": "88fe5c27-f50d-4190-8a3f-074b2afdcef6",
+      "name": "Groq Create Product Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3216,
+        320
+      ],
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parses the Groq Chat Completions product draft, without retrying or making extra calls.\nconst j = $input.first().json || {};\nfunction errMsg(e) {\n  if (!e) return 'unknown API error';\n  if (typeof e === 'string') return e;\n  if (e.message) return e.message;\n  if (e.error && e.error.message) return e.error.message;\n  try { return JSON.stringify(e); } catch (_) { return String(e); }\n}\nfunction apiError(r) {\n  if (r.errorMessage) return String(r.errorMessage) + (r.errorDescription ? ': ' + r.errorDescription : '');\n  if (r.error) return errMsg(r.error);\n  if (Number(r.statusCode || r.status) >= 400) return 'HTTP ' + (r.statusCode || r.status) + ': ' + errMsg(r);\n  // n8n may wrap a failed HTTP Request as a root-level NodeApiError item.\n  if (!Array.isArray(r.choices) && typeof r.message === 'string' && (r.name || r.description || r.context || r.cause)) {\n    return String(r.name || 'Request error') + ': ' + r.message + (r.description ? ' — ' + r.description : '');\n  }\n  return null;\n}\nfunction extractText(r) {\n  if (typeof r.output_text === 'string') return r.output_text;\n  const choices = Array.isArray(r.choices) ? r.choices : (r.data && Array.isArray(r.data.choices) ? r.data.choices : []);\n  if (choices.length && choices[0].message) {\n    const c = choices[0].message.content;\n    if (typeof c === 'string') return c;\n    if (Array.isArray(c)) return c.map(x => typeof x === 'string' ? x : (x.text || x.content || '')).join('\\n');\n  }\n  const out = Array.isArray(r.output) ? r.output : [];\n  for (const m of out) {\n    if (m && Array.isArray(m.content)) {\n      const part = m.content.find(x => x && (x.text !== undefined || x.output_text !== undefined));\n      if (part) return String(part.text !== undefined ? part.text : part.output_text);\n    }\n  }\n  return null;\n}\nfunction parseJson(text) {\n  if (text && typeof text === 'object') return text;\n  let s = String(text || '').trim().replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '');\n  try { return JSON.parse(s); } catch (_) {}\n  const a = s.indexOf('{'), b = s.lastIndexOf('}');\n  if (a < 0 || b <= a) throw new Error('Model returned no JSON object.');\n  return JSON.parse(s.slice(a, b + 1));\n}\nlet product = null, status = '', calls = 1;\nconst errors = [];\nconst problem = apiError(j);\nif (problem) {\n  status = 'failed: Groq product-draft request: ' + problem;\n  errors.push(status);\n} else {\n  try {\n    const text = extractText(j);\n    if (text === null) throw new Error('No choices[0].message.content found. Response keys: ' + Object.keys(j).join(', '));\n    product = parseJson(text);\n    if (!product || typeof product !== 'object' || Array.isArray(product)) throw new Error('Product response was not a JSON object.');\n    product.suggested_price_idr = Math.round(Number(String(product.suggested_price_idr || '').replace(/[^0-9]/g, '')) || 0);\n    product.draft_label = 'DRAFT (Groq-generated) - not reviewed, not approved, not published';\n    status = 'completed: Groq product draft returned';\n  } catch (e) {\n    status = 'failed: Groq product response parsing: ' + errMsg(e);\n    errors.push(status);\n  }\n}\nreturn [{ json: { product, product_ok: product !== null, product_source: 'groq', openai_status_product: status, ai_calls_product: calls, product_errors: errors } }];"
+      },
+      "id": "b58387f5-b936-4b99-9926-00bad89cbf4b",
+      "name": "Parse Product Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "claude-plan",
+              "leftValue": "={{ $('Validate Configuration').first().json.ai_plan.claude_review }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "product-ok",
+              "leftValue": "={{ $json.product_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "218b4fd4-f9ef-4d4c-b05d-c545476043e3",
+      "name": "Claude Review Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3664,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-5-5"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Independently review this digital product draft for Indonesian customers: {{ JSON.stringify($json.product) }}\nAssess: product usefulness, missing sections, unsupported or exaggerated claims, originality, audience fit, pricing rationale (range {{ $('Validate Configuration').first().json.config.min_price }}-{{ $('Validate Configuration').first().json.config.max_price }} IDR), and sales-copy clarity.\nReply with ONLY a JSON object of the form {\"verdict\":\"approve|revise|reject\",\"risk_level\":\"low|medium|high\",\"issues\":[{\"category\":\"\",\"description\":\"\",\"severity\":\"low|medium|high\"}],\"improvements\":[\"\"],\"unsupported_claims\":[\"\"],\"missing_sections\":[\"\"],\"pricing_assessment\":\"\"}."
+            }
+          ]
+        },
+        "options": {
+          "includeMergedResponse": true,
+          "system": "You are an independent, critical product reviewer. Judge only what is in the draft. Do not invent market data. Output strict JSON only, no markdown.",
+          "maxTokens": 3000,
+          "temperature": 0.2
+        }
+      },
+      "id": "561188a4-201f-46d4-92f5-22a3bc0948c7",
+      "name": "Claude Independent Review",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [
+        3888,
+        352
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "anthropicApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      },
+      "disabled": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parses Claude's structured review. If the node is disabled or the credential is missing, says so plainly.\nconst j = $input.first().json || {};\nconst draft = $('Parse Product Draft').first().json;\nconst plan = $('Validate Configuration').first().json.ai_plan;\nfunction errMsg(e) { if (!e) return 'unknown error'; if (typeof e === 'string') return e; return e.message || JSON.stringify(e); }\nlet review = null;\nlet status;\nlet calls = 0;\nconst errors = [];\nlet text = null;\nif (typeof j.merged_response === 'string') text = j.merged_response;\nelse if (Array.isArray(j.content)) { const blk = j.content.find(function (c) { return c && c.type === 'text'; }); text = blk ? blk.text : null; }\nif (j.error) {\n  calls = 1;\n  status = 'failed: ' + errMsg(j.error);\n  errors.push('Claude review failed: ' + errMsg(j.error));\n} else if (text === null) {\n  status = 'not_configured: \"Claude Independent Review\" is disabled or has no Anthropic credential. The review did NOT happen.';\n  errors.push(status);\n} else {\n  calls = 1;\n  try {\n    const a = text.indexOf('{'); const b = text.lastIndexOf('}');\n    if (a === -1 || b <= a) throw new Error('response was not JSON');\n    const r = JSON.parse(text.slice(a, b + 1));\n    const verdicts = ['approve', 'revise', 'reject'];\n    const risks = ['low', 'medium', 'high'];\n    if (verdicts.indexOf(r.verdict) === -1 || risks.indexOf(r.risk_level) === -1 || !Array.isArray(r.issues) || !Array.isArray(r.improvements)) throw new Error('structured output is missing verdict, risk_level, issues, or improvements');\n    review = r;\n    status = 'completed: verdict=' + r.verdict + ', risk=' + r.risk_level;\n  } catch (e) {\n    status = 'failed: ' + errMsg(e);\n    errors.push('Could not parse Claude review: ' + errMsg(e));\n  }\n}\nreturn [{ json: Object.assign({}, draft, {\n  review: review,\n  claude_status: status,\n  ai_calls_review: calls,\n  review_errors: errors,\n  review_needs_revision: !!(review && review.verdict === 'revise' && review.improvements.length > 0),\n  final_revision_allowed: plan.final_revision === true,\n}) }];"
+      },
+      "id": "3753a66a-2ecc-40d0-ac6b-454e40fccdd0",
+      "name": "Parse Claude Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4112,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "needs-rev",
+              "leftValue": "={{ $json.review_needs_revision }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "rev-budget",
+              "leftValue": "={{ $json.final_revision_allowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a100b4b9-eae1-4da4-849d-dd5c31ef18b1",
+      "name": "Revision Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4336,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-6-luna"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You revise digital product drafts using reviewer feedback. Remove unsupported claims, fill missing sections, keep Bahasa Indonesia. Respond with valid JSON only, in the same structure as the input draft."
+            },
+            {
+              "content": "=Draft: {{ JSON.stringify($json.product) }}\nIndependent review: {{ JSON.stringify($json.review) }}\nApply every actionable improvement and return the full revised draft as a JSON object with the same keys: title, subtitle, description, target_audience, customer_benefits, deliverables, outline, suggested_price_idr, pricing_rationale, sales_copy."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 6000,
+          "store": false,
+          "textFormat": {
+            "textOptions": {
+              "type": "json_object"
+            }
+          }
+        }
+      },
+      "id": "754ff460-564b-4cf7-93a2-048d31ff0e2e",
+      "name": "OpenAI Final Revision",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        4576,
+        272
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "openAiApi": {
+          "id": "9MJSUFuAgSxggxPB",
+          "name": "OpenAI account"
+        }
+      },
+      "disabled": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Uses the revised draft if it parsed; otherwise keeps the reviewed draft and reports why.\nconst j = $input.first().json || {};\nconst prev = $('Parse Claude Review').first().json;\nfunction errMsg(e) { if (!e) return 'unknown error'; if (typeof e === 'string') return e; return e.message || JSON.stringify(e); }\nlet product = prev.product;\nlet status;\nlet calls = 0;\nconst errors = (prev.product_errors || []).slice();\nif (j.error) { calls = 1; status = 'failed: ' + errMsg(j.error) + ' (kept pre-revision draft)'; errors.push('OpenAI final revision failed: ' + errMsg(j.error)); }\nelse if (j.output === undefined) { status = 'not_configured: \"OpenAI Final Revision\" is disabled or has no credential (kept pre-revision draft)'; errors.push(status); }\nelse {\n  calls = 1;\n  try {\n    let content = null;\n    for (const m of (Array.isArray(j.output) ? j.output : [])) {\n      if (m && Array.isArray(m.content)) { for (const p of m.content) { if (p && p.text !== undefined && p.text !== null) { content = p.text; break; } } }\n      if (content !== null) break;\n    }\n    if (content === null) throw new Error('no text content');\n    let revised = content;\n    if (typeof revised !== 'object') { const s = String(revised); const a = s.indexOf('{'); const b = s.lastIndexOf('}'); revised = JSON.parse(s.slice(a, b + 1)); }\n    revised.suggested_price_idr = Math.round(Number(String(revised.suggested_price_idr || '').replace(/[^0-9]/g, '')) || 0);\n    revised.draft_label = 'DRAFT (AI generated, revised after Claude review) - not approved, not published';\n    product = revised;\n    status = 'completed: revised draft applied';\n  } catch (e) { status = 'failed: ' + errMsg(e) + ' (kept pre-revision draft)'; errors.push('Could not parse revised draft: ' + errMsg(e)); }\n}\nreturn [{ json: Object.assign({}, prev, { product: product, revision_status: status, ai_calls_revision: calls, product_errors: errors }) }];"
+      },
+      "id": "829c4067-e7e1-49d6-b5b5-6fdfe445ffa8",
+      "name": "Apply Final Revision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4784,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validates required fields, completeness, price range, duplicate status, review status, and claims.\n// A passing QA only means the draft is complete enough for owner review. It is NOT evidence of demand or sales.\nconst d = $input.first().json;\nconst v = $('Validate Configuration').first().json;\nconst cfg = v.config;\nconst plan = v.ai_plan;\nconst sel = $('Score & Select Idea').first().json;\nconst existing = $('Prepare Existing Records').first().json.existing_records || [];\nconst p = d.product || null;\nconst failures = [];\nconst warnings = [];\nfunction norm(t) { return String(t || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9 ]+/g, ' ').replace(/ +/g, ' ').trim(); }\nfunction str(x) { return typeof x === 'string' ? x.trim() : ''; }\n\nif (!p) {\n  failures.push('No product draft is available (' + (d.openai_status_product || 'unknown reason') + ').');\n} else {\n  if (!str(p.title)) failures.push('Missing title.');\n  if (str(p.description).length < 150) failures.push('Description is missing or shorter than 150 characters.');\n  if (!str(p.target_audience)) failures.push('Missing target audience.');\n  if (!Array.isArray(p.customer_benefits) || p.customer_benefits.filter(str).length < 3) failures.push('Fewer than 3 customer benefits.');\n  if (!Array.isArray(p.deliverables) || p.deliverables.filter(function (x) { return x && str(x.name) && str(x.format) && str(x.details); }).length < 2) failures.push('Fewer than 2 fully described deliverables (name, format, details).');\n  const sections = Array.isArray(p.outline) ? p.outline.filter(function (s) { return s && str(s.section) && Array.isArray(s.contents) && s.contents.filter(str).length >= 2; }) : [];\n  if (sections.length < 4) failures.push('Outline has fewer than 4 sections with at least 2 concrete content items each (empty outline).');\n  const sc = p.sales_copy || {};\n  if (!str(sc.headline)) failures.push('Sales copy headline missing.');\n  if (str(sc.body).length < 150) failures.push('Sales copy body missing or shorter than 150 characters.');\n  if (!str(sc.call_to_action)) failures.push('Sales copy call to action missing.');\n  if (!str(p.pricing_rationale)) failures.push('Pricing rationale missing.');\n  if (cfg.run_mode === 'live') {\n    const pc = p.product_content || {};\n    const chapters = Array.isArray(pc.chapters) ? pc.chapters.filter(function (x) { return x && str(x.title) && str(x.content).length >= 400; }) : [];\n    const templates = Array.isArray(pc.templates) ? pc.templates.filter(function (x) { return x && str(x.name) && str(x.content).length >= 100; }) : [];\n    if (str(pc.introduction).length < 100) failures.push('Buyer-ready product introduction is missing or too short.');\n    if (chapters.length < 4) failures.push('Product content needs at least 4 fully written chapters (each at least 400 characters).');\n    if (templates.length < 2) failures.push('Product content needs at least 2 complete templates/worksheets (each at least 100 characters).');\n    if (str(pc.usage_instructions).length < 100) failures.push('Product usage instructions are missing or too short.');\n  }\n  const price = Number(p.suggested_price_idr);\n  if (!Number.isInteger(price) || price < cfg.min_price || price > cfg.max_price) failures.push('Price ' + p.suggested_price_idr + ' is outside ' + cfg.min_price + '-' + cfg.max_price + ' IDR.');\n\n  // Duplicate checks: selected idea and final product title\n  if (sel.selected_idea && sel.selected_idea.duplicate_status === 'exact_duplicate') failures.push('Selected idea is an exact duplicate of an existing product.');\n  if (sel.selected_idea && sel.selected_idea.duplicate_status === 'close_match') warnings.push('Selected idea closely matches \"' + sel.selected_idea.matched_title + '\" (' + sel.selected_idea.matched_source + '). Owner should confirm it is distinct.');\n  const pt = norm(p.title);\n  const dupTitle = existing.find(function (r) { return norm(r.title) === pt; });\n  if (dupTitle) failures.push('Final product title duplicates existing product \"' + dupTitle.title + '\" (' + dupTitle.source + ').');\n\n  // Exaggerated / unsupported claims\n  const text = JSON.stringify(p).toLowerCase();\n  const HARD = ['dijamin', 'garansi hasil', 'pasti laku', 'pasti untung', 'pasti diterima', 'pasti berhasil', '100%', 'guaranteed', 'terbukti', 'ribuan pembeli', 'ribuan pelanggan', 'terlaris', 'best seller', 'bestseller', 'nomor 1', 'no. 1', 'cepat kaya', 'kaya mendadak'];\n  const SOFT = ['passive income', 'omzet naik', 'tanpa modal', 'auto cuan', 'laris manis'];\n  HARD.forEach(function (w) { if (text.indexOf(w) !== -1) failures.push('Unsupported or exaggerated claim found: \"' + w + '\". Remove it or provide evidence.'); });\n  SOFT.forEach(function (w) { if (text.indexOf(w) !== -1) warnings.push('Potentially exaggerated phrase: \"' + w + '\". Review before publishing.'); });\n}\n\n// Review status\nlet claudeStatus = d.claude_status;\nif (!claudeStatus) {\n  if (cfg.run_mode !== 'live') claudeStatus = 'not_run: simulation mode (no API call)';\n  else if (!cfg.enable_claude_review) claudeStatus = 'disabled: enable_claude_review is false';\n  else if (!plan.claude_review) claudeStatus = 'skipped: AI-call budget (max_ai_calls_per_execution=' + cfg.max_ai_calls_per_execution + ') does not allow a 3rd call';\n  else if (!d.product_ok) claudeStatus = 'skipped: no product draft to review';\n  else claudeStatus = 'not_run';\n}\nif (d.review) {\n  if (d.review.verdict === 'reject') failures.push('Claude review verdict is \"reject\".');\n  if (d.review.risk_level === 'high') failures.push('Claude review risk level is \"high\".');\n  if (d.review.verdict === 'revise' && !String(d.revision_status || '').startsWith('completed')) warnings.push('Claude requested revisions that were not applied automatically: ' + (d.review.improvements || []).join(' | '));\n}\nif (cfg.run_mode === 'live' && cfg.enable_claude_review && !String(claudeStatus).startsWith('completed')) warnings.push('Claude review was requested but did not complete: ' + claudeStatus);\nif (cfg.run_mode === 'simulation') warnings.push('Simulation mode: content is sample data and was not produced or reviewed by any AI.');\n\nconst ideaStatusNode = $('Score & Select Idea').first().json;\nconst openaiStatus = {\n  idea_generation: ideaStatusNode.openai_status_ideas,\n  product_creation: d.openai_status_product || 'not_run',\n  final_revision: d.revision_status || (d.review_needs_revision ? 'skipped: AI-call budget does not allow a 4th call' : 'not_run'),\n};\nconst aiCallsUsed = (ideaStatusNode.ai_calls_ideas || 0) + (d.ai_calls_product || 0) + (d.ai_calls_review || 0) + (d.ai_calls_revision || 0);\n\nconst qaPassed = failures.length === 0;\nconst productStatus = qaPassed ? 'pending_approval' : 'rejected_qa';\nconst keyBase = p && str(p.title) ? norm(p.title).split(' ').join('-').slice(0, 80) : 'no-product-' + $execution.id;\nconst productKey = 'lf-' + cfg.run_mode + '-' + keyBase;\nconst now = new Date().toISOString();\nconst allErrors = [].concat(sel.idea_errors || [], d.product_errors || [], d.review_errors || []);\n\nreturn [{ json: {\n  product: p,\n  product_key: productKey,\n  qa_passed: qaPassed,\n  qa_failures: failures,\n  qa_warnings: warnings,\n  product_status: productStatus,\n  approval_status: qaPassed ? 'pending_approval' : 'not_requested',\n  openai_status: openaiStatus,\n  claude_status: claudeStatus,\n  review: d.review || null,\n  ai_calls_used: aiCallsUsed,\n  errors: allErrors,\n  approval_payload: qaPassed ? {\n    product_key: productKey,\n    title: p.title,\n    price: p.suggested_price_idr,\n    currency: cfg.currency,\n    score: sel.selected_score,\n    qa_warnings: warnings,\n    note: 'Approving marks the draft as approved only. Nothing is published automatically (auto_publish=false).',\n  } : null,\n  record: {\n    product_key: productKey,\n    product_title: p ? str(p.title) : '',\n    run_mode: cfg.run_mode,\n    product_status: productStatus,\n    approval_status: qaPassed ? 'pending_approval' : 'not_requested',\n    score: sel.selected_score || 0,\n    score_breakdown_json: JSON.stringify(sel.selected_score_breakdown || {}),\n    price_idr: p ? Number(p.suggested_price_idr) || 0 : 0,\n    currency: cfg.currency,\n    target_audience: p ? str(p.target_audience) : '',\n    description: p ? str(p.description) : '',\n    outline_json: JSON.stringify(p ? { outline: p.outline || [], deliverables: p.deliverables || [], customer_benefits: p.customer_benefits || [], product_content: p.product_content || null } : {}),\n    sales_copy: JSON.stringify(p ? p.sales_copy || {} : {}),\n    qa_passed: qaPassed,\n    qa_results_json: JSON.stringify({ failures: failures, warnings: warnings }),\n    openai_status: JSON.stringify(openaiStatus),\n    claude_status: claudeStatus,\n    review_feedback_json: JSON.stringify(d.review || null),\n    approval_notes: '',\n    errors_json: JSON.stringify(allErrors),\n    execution_id: String($execution.id),\n    last_updated: now,\n  },\n} }];"
+      },
+      "id": "3c01da16-8746-4b40-bfa8-963d92773cee",
+      "name": "Quality Assurance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5008,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "2cHI9ktMoythWfzu",
+          "cachedResultName": "lynkfusion_products"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "product_key",
+              "keyValue": "={{ $json.record.product_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "value": {
+            "product_key": "={{ $json.record.product_key }}",
+            "product_title": "={{ $json.record.product_title }}",
+            "run_mode": "={{ $json.record.run_mode }}",
+            "product_status": "={{ $json.record.product_status }}",
+            "approval_status": "={{ $json.record.approval_status }}",
+            "score": "={{ $json.record.score }}",
+            "score_breakdown_json": "={{ $json.record.score_breakdown_json }}",
+            "price_idr": "={{ $json.record.price_idr }}",
+            "currency": "={{ $json.record.currency }}",
+            "target_audience": "={{ $json.record.target_audience }}",
+            "description": "={{ $json.record.description }}",
+            "outline_json": "={{ $json.record.outline_json }}",
+            "sales_copy": "={{ $json.record.sales_copy }}",
+            "qa_passed": "={{ $json.record.qa_passed }}",
+            "qa_results_json": "={{ $json.record.qa_results_json }}",
+            "openai_status": "={{ $json.record.openai_status }}",
+            "claude_status": "={{ $json.record.claude_status }}",
+            "review_feedback_json": "={{ $json.record.review_feedback_json }}",
+            "approval_notes": "={{ $json.record.approval_notes }}",
+            "errors_json": "={{ $json.record.errors_json }}",
+            "execution_id": "={{ $json.record.execution_id }}",
+            "last_updated": "={{ $json.record.last_updated }}",
+            "approval_form_url": "={{ $json.qa_passed ? $execution.resumeFormUrl : '' }}"
+          },
+          "schema": [
+            {
+              "id": "product_key",
+              "displayName": "product_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "product_title",
+              "displayName": "product_title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "run_mode",
+              "displayName": "run_mode",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "product_status",
+              "displayName": "product_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_status",
+              "displayName": "approval_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "score",
+              "displayName": "score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "score_breakdown_json",
+              "displayName": "score_breakdown_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "price_idr",
+              "displayName": "price_idr",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "target_audience",
+              "displayName": "target_audience",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "outline_json",
+              "displayName": "outline_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sales_copy",
+              "displayName": "sales_copy",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "qa_passed",
+              "displayName": "qa_passed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "qa_results_json",
+              "displayName": "qa_results_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "openai_status",
+              "displayName": "openai_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "claude_status",
+              "displayName": "claude_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "review_feedback_json",
+              "displayName": "review_feedback_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_notes",
+              "displayName": "approval_notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "errors_json",
+              "displayName": "errors_json",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_updated",
+              "displayName": "last_updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_form_url",
+              "displayName": "approval_form_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "947d0cd9-b7bb-4023-b8ad-d1f2781148eb",
+      "name": "Save Product Record",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        5680,
+        416
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "qa-ok",
+              "leftValue": "={{ $('Quality Assurance').first().json.qa_passed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d2816a4d-d4f9-45e8-affa-095c92a7d73a",
+      "name": "QA Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5904,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "form",
+        "formTitle": "LynkFusion draft approval",
+        "formDescription": "=<p><b>{{ $('Quality Assurance').first().json.product.title }}</b></p><p>Mode: {{ $('Validate Configuration').first().json.config.run_mode }} | Price: {{ $('Quality Assurance').first().json.product.suggested_price_idr }} IDR | Score: {{ $('Score & Select Idea').first().json.selected_score }}/100</p><p>{{ $('Quality Assurance').first().json.product.description }}</p><p>Headline: {{ $('Quality Assurance').first().json.product.sales_copy.headline }}</p><p>QA warnings: {{ $('Quality Assurance').first().json.qa_warnings.join(' | ') || 'none' }}</p><p>Approving marks the draft as approved only. Nothing is published.</p>",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve draft"
+                  },
+                  {
+                    "option": "Request changes"
+                  },
+                  {
+                    "option": "Reject"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Reviewer name",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Notes",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "resumeAmount": 72,
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Decision recorded in lynkfusion_products. Nothing was published."
+            }
+          }
+        }
+      },
+      "id": "22658a14-64b6-48f3-a216-7ea4e55c0ebe",
+      "name": "Wait for Owner Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        6128,
+        480
+      ],
+      "webhookId": "f5603e7a-82ad-49b9-8fdc-c8635fdbc593"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Maps the owner's form submission to a status. No submission (72h timeout) keeps the draft pending_approval.\nconst qa = $('Quality Assurance').first().json;\nconst f = $input.first().json || {};\nconst decision = f['Decision'] || null;\nconst reviewer = String(f['Reviewer name'] || '').trim();\nconst notes = String(f['Notes'] || '').trim();\nlet approval = 'pending_approval';\nlet status = 'pending_approval';\nif (decision === 'Approve draft') { approval = 'approved'; status = 'approved_not_published'; }\nelse if (decision === 'Request changes') { approval = 'changes_requested'; status = 'changes_requested'; }\nelse if (decision === 'Reject') { approval = 'rejected_by_owner'; status = 'rejected_by_owner'; }\nconst now = new Date().toISOString();\nreturn [{ json: {\n  product_key: qa.product_key,\n  decision_submitted: !!decision,\n  approval_decision: decision || 'none_timed_out',\n  approval_status: approval,\n  product_status: status,\n  reviewer_name: decision ? reviewer : '',\n  approval_notes: decision ? notes : 'No owner response within 72 hours; still pending_approval. Rerun to request approval again.',\n  decided_at: decision ? now : '',\n  last_updated: now,\n} }];"
+      },
+      "id": "9c1625fa-a526-482b-8948-e7d3ae7049cc",
+      "name": "Record Approval Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6352,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "2cHI9ktMoythWfzu",
+          "cachedResultName": "lynkfusion_products"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "product_key",
+              "keyValue": "={{ $json.product_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "value": {
+            "product_key": "={{ $json.product_key }}",
+            "approval_status": "={{ $json.approval_status }}",
+            "product_status": "={{ $json.product_status }}",
+            "approval_notes": "={{ $json.approval_notes }}",
+            "approval_decision": "={{ $json.approval_decision }}",
+            "reviewer_name": "={{ $json.reviewer_name }}",
+            "decided_at": "={{ $json.decided_at }}",
+            "last_updated": "={{ $json.last_updated }}"
+          },
+          "schema": [
+            {
+              "id": "product_key",
+              "displayName": "product_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_status",
+              "displayName": "approval_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "product_status",
+              "displayName": "product_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_notes",
+              "displayName": "approval_notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "approval_decision",
+              "displayName": "approval_decision",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reviewer_name",
+              "displayName": "reviewer_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "decided_at",
+              "displayName": "decided_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "last_updated",
+              "displayName": "last_updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "13b504bb-b8ed-4728-bfb3-c8a6c6e60832",
+      "name": "Update Approval Status",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6576,
+        480
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Single structured report for every path (invalid config, no candidate, QA failed, approval decided).\nfunction getItem(name) { try { const n = $(name); if (n.isExecuted) return n.first(); } catch (e) {} return null; }\nfunction get(name) { const item = getItem(name); return item ? item.json : null; }\nfunction errMsg(e) { if (!e) return ''; if (typeof e === 'string') return e; return e.message || JSON.stringify(e); }\nconst v = get('Validate Configuration') || {};\nconst cfg = v.config || {};\nconst existing = get('Prepare Existing Records');\nconst dup = get('Detect Duplicates');\nconst sc = get('Score & Select Idea');\nconst qa = get('Quality Assurance');\nconst save = get('Save Product Record');\nconst appr = get('Record Approval Decision');\nconst upd = get('Update Approval Status');\nconst fileItem = getItem('Build Product Files');\nconst files = fileItem ? fileItem.json : null;\n\nconst errors = [].concat(v.config_errors || []);\nif (existing && existing.load_error) errors.push('Data table load error: ' + existing.load_error);\nif (qa) errors.push.apply(errors, qa.errors || []); else if (sc) errors.push.apply(errors, sc.idea_errors || []);\n\nlet persistence;\nif (cfg.run_mode === 'simulation') persistence = 'skipped: safe simulation mode; no product rows were written';\nelse if (!save) persistence = 'not_persisted: run stopped before the persistence step';\nelse if (save.error) { persistence = 'failed: ' + errMsg(save.error); errors.push('Persistence failed: ' + errMsg(save.error)); }\nelse persistence = 'saved: Data Table lynkfusion_products (upsert by product_key ' + (qa ? qa.product_key : '') + ')';\nif (upd) {\n  if (upd.error) { persistence += '; approval update failed: ' + errMsg(upd.error); errors.push('Approval status update failed: ' + errMsg(upd.error)); }\n  else persistence += '; approval decision saved';\n}\n\nlet approvalStatus = 'not_requested';\nif (appr) approvalStatus = appr.approval_status;\nelse if (qa) approvalStatus = qa.qa_passed ? 'pending_approval' : 'not_requested: QA failed';\n\nconst openai = qa ? qa.openai_status : { idea_generation: sc ? sc.openai_status_ideas : (dup ? dup.openai_status_ideas : 'not_run'), product_creation: 'not_run', final_revision: 'not_run' };\nlet claude = qa ? qa.claude_status : 'not_run: run stopped before review step';\n\nlet next;\nif (!v.config_valid) next = 'Fix the configuration errors in the \"Configuration\" node and run again.';\nelse if (sc && !sc.has_valid_candidate) next = cfg.run_mode === 'live' ? 'No valid idea. Check Groq status (credential selected and \"Groq Generate Ideas\" connected), then review the exact provider error before any retry.' : 'No valid sample idea remained after duplicate checks; adjust sample data or switch to live mode.';\nelse if (qa && !qa.qa_passed) next = 'Fix the QA failures listed, then rerun. Nothing was sent for approval.';\nelse if (cfg.run_mode === 'simulation' && qa && qa.qa_passed) next = 'Simulation finished with no AI calls and no database write. Download the Markdown and HTML files from the Build Product Files node output. They are sample drafts, not ready for sale. When API costs/credentials are confirmed, switch run_mode to live for a maximum of 2 AI calls; Lynk publishing still requires manual upload because no product-creation node is configured.';\nelse if (cfg.run_mode === 'simulation' && qa) next = 'Simulation finished but QA failed. Review qa_results; no database write or approval wait occurred. No AI calls were made.';\nelse if (appr && appr.approval_status === 'approved') next = 'Draft approved. Publishing is NOT implemented in this workflow: upload the product file and enter the approved sales copy/price in Lynk dashboard manually.';\nelse if (appr && appr.approval_status === 'changes_requested') next = 'Owner requested changes: revise the draft using the notes and rerun.';\nelse if (appr && appr.approval_status === 'rejected_by_owner') next = 'Owner rejected the draft. Run again to pick a different idea.';\nelse next = 'Owner approval still pending (no decision within 72 hours). Rerun and open the approval_form_url stored in lynkfusion_products.';\n\nconst p = qa ? qa.product : null;\nconst resultItem = { json: {\n  run_mode: cfg.run_mode || 'unknown',\n  primary_ai: cfg.primary_ai || 'groq',\n  ai_provider: 'Groq Chat Completions (OpenAI-compatible API)',\n  config_valid: !!v.config_valid,\n  config_warnings: v.config_warnings || [],\n  ideas_generated: dup ? dup.ideas_generated : 0,\n  duplicates_rejected: dup ? dup.duplicates_rejected : 0,\n  close_matches_flagged: dup ? dup.close_matches_flagged : 0,\n  existing_record_source: existing ? existing.record_source : 'not_loaded',\n  duplicate_check_note: dup ? dup.duplicate_check_note : null,\n  selected_idea: sc ? sc.selected_idea : null,\n  score: sc ? sc.selected_score : null,\n  score_breakdown: sc ? sc.selected_score_breakdown : null,\n  scoring_method: sc ? sc.scoring_method : null,\n  ranked_ideas: sc ? sc.ranked_ideas : [],\n  proposed_price: p ? p.suggested_price_idr : null,\n  currency: cfg.currency || 'IDR',\n  product_outline: p ? { title: p.title, subtitle: p.subtitle, description: p.description, target_audience: p.target_audience, customer_benefits: p.customer_benefits, deliverables: p.deliverables, outline: p.outline, pricing_rationale: p.pricing_rationale, draft_label: p.draft_label } : null,\n  product_content: p ? (p.product_content || null) : null,\n  product_files_ready: !!(files && files.product_files_ready),\n  product_file_names: files ? files.product_file_names : [],\n  product_file_status: files ? files.product_file_status : 'not_created',\n  sales_copy: p ? p.sales_copy : null,\n  qa_results: qa ? { passed: qa.qa_passed, failures: qa.qa_failures, warnings: qa.qa_warnings } : null,\n  openai_status: openai,\n  claude_status: claude,\n  claude_review: qa ? qa.review : null,\n  ai_calls_used: qa ? qa.ai_calls_used : 0,\n  ai_call_limit: cfg.max_ai_calls_per_execution,\n  product_status: cfg.run_mode === 'simulation' ? 'simulation_draft_only' : (appr ? appr.product_status : (qa ? qa.product_status : 'not_created')),\n  approval_status: cfg.run_mode === 'simulation' ? 'not_requested_simulation' : approvalStatus,\n  approval_notes: appr ? appr.approval_notes : null,\n  approval_decision: appr ? appr.approval_decision : null,\n  reviewer_name: appr ? appr.reviewer_name : null,\n  approval_form_url: (cfg.run_mode === 'live' && qa && qa.qa_passed) ? ($execution.resumeFormUrl || null) : null,\n  persistence_status: persistence,\n  published: false,\n  disclaimer: 'Nothing was published. A successful execution is not evidence of market demand, validation, or sales.',\n  errors: errors,\n  next_required_action: next,\n  finished_at: new Date().toISOString(),\n} };\nif (fileItem && fileItem.binary) resultItem.binary = fileItem.binary;\nreturn [resultItem];"
+      },
+      "id": "50992ff3-62bd-4f6b-97c4-cd16deb4337c",
+      "name": "Build Final Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6800,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// SIMULATION ONLY: realistic sample product draft for the selected idea. No API calls.\nconst sel = $('Score & Select Idea').first().json.selected_idea;\nconst DRAFT = 'DRAFT (simulation sample) - not reviewed, not approved, not published';\nconst library = {\n  sop: {\n    title: 'Kit SOP Admin Online Shop: 25 Template Siap Pakai',\n    subtitle: 'Standarkan cara admin membalas chat, memproses pesanan, dan menangani komplain',\n    description: 'Kit berisi 25 dokumen SOP siap edit untuk online shop yang dijalankan bersama admin. Setiap SOP menjelaskan langkah kerja, contoh kalimat, dan titik pengecekan sehingga pemilik toko bisa menyerahkan tugas harian tanpa harus menjelaskan ulang setiap kali ada admin baru. Disusun untuk alur kerja Shopee, Tokopedia, TikTok Shop, dan WhatsApp.',\n    customer_benefits: ['Admin baru punya panduan tertulis sejak hari pertama', 'Balasan chat pelanggan lebih konsisten antar admin', 'Checklist harian membantu mengurangi salah input dan salah kirim pesanan', 'Pemilik toko memiliki dokumen kerja yang bisa diperbarui sendiri'],\n    deliverables: [\n      { name: '25 template SOP', format: 'Notion dan Google Docs', details: 'Penerimaan pesanan, pengemasan, retur, komplain, stok, promo, serah terima shift, dan lainnya.' },\n      { name: 'Bank 60 script balasan chat', format: 'Google Docs', details: 'Salam, konfirmasi pesanan, keterlambatan, stok habis, komplain, dan permintaan ulasan.' },\n      { name: 'Checklist harian dan mingguan admin', format: 'Google Sheets', details: 'Daftar tugas yang dapat dicentang dan direkap oleh pemilik toko.' },\n      { name: 'Panduan implementasi 7 hari', format: 'PDF', details: 'Urutan menerapkan SOP, cara melatih admin, dan cara merevisi SOP.' },\n    ],\n    outline: [\n      { section: '1. Fondasi SOP toko', contents: ['Cara membaca dan mengedit template', 'Menentukan peran pemilik dan admin', 'Standar waktu balas chat'] },\n      { section: '2. SOP pesanan', contents: ['Verifikasi pesanan masuk', 'Pengemasan dan foto bukti kemasan', 'Input resi dan update status'] },\n      { section: '3. SOP layanan pelanggan', contents: ['Script balasan per situasi', 'Alur penanganan komplain', 'Alur retur dan refund sesuai kebijakan marketplace'] },\n      { section: '4. SOP stok dan promo', contents: ['Cek stok harian', 'Persiapan kampanye tanggal kembar', 'Update harga dan voucher'] },\n      { section: '5. Kontrol dan evaluasi', contents: ['Checklist harian admin', 'Rekap mingguan untuk pemilik', 'Cara merevisi SOP berdasarkan kendala nyata'] },\n    ],\n    suggested_price_idr: 79000,\n    pricing_rationale: 'Berada di tengah rentang harga 19.000-149.000 IDR; mencakup 4 jenis file siap edit dan ditujukan untuk pemilik usaha yang menghemat waktu pelatihan admin. Harga perlu divalidasi dengan penjualan nyata.',\n    sales_copy: {\n      headline: 'Capek menjelaskan hal yang sama ke setiap admin baru?',\n      body: 'Kit SOP Admin Online Shop memberi Anda 25 template kerja siap edit, 60 script balasan chat, dan checklist harian agar admin tahu persis apa yang harus dilakukan. Semua dalam Bahasa Indonesia dan disusun untuk alur marketplace lokal. Edit sesuai toko Anda, bagikan ke admin, dan mulai terapkan dengan panduan 7 hari.',\n      bullet_points: ['25 SOP siap edit di Notion dan Google Docs', '60 script balasan chat untuk situasi umum', 'Checklist harian dan rekap mingguan di Google Sheets', 'Panduan implementasi 7 hari'],\n      call_to_action: 'Dapatkan Kit SOP Admin dan mulai rapikan operasional toko Anda.',\n    },\n  },\n  interview: {\n    title: 'Workbook Siap Wawancara: Latihan Terstruktur untuk Fresh Graduate',\n    subtitle: '50 pertanyaan wawancara, kerangka jawaban STAR, dan lembar latihan pengalaman',\n    description: 'Workbook PDF interaktif yang membantu fresh graduate menyiapkan jawaban wawancara secara terstruktur. Berisi pertanyaan yang umum diajukan HR dan user di Indonesia, kerangka STAR untuk menceritakan pengalaman organisasi dan magang, serta lembar latihan yang bisa diisi langsung sebelum wawancara.',\n    customer_benefits: ['Jawaban wawancara lebih terstruktur dan mudah diingat', 'Pengalaman organisasi dan magang dapat diceritakan dengan jelas', 'Persiapan H-1 tidak ada yang terlewat', 'Latihan dapat dilakukan mandiri tanpa biaya kelas'],\n    deliverables: [\n      { name: 'Workbook latihan', format: 'PDF interaktif', details: '50 pertanyaan dengan ruang jawaban dan kerangka STAR.' },\n      { name: 'Contoh jawaban beranotasi', format: 'PDF', details: '15 contoh jawaban dengan catatan kekuatan dan kelemahannya.' },\n      { name: 'Checklist persiapan H-1', format: 'PDF', details: 'Dokumen, riset perusahaan, pakaian, dan persiapan wawancara online.' },\n    ],\n    outline: [\n      { section: '1. Memahami proses wawancara', contents: ['Tahap HR dan tahap user', 'Wawancara online dan tatap muka', 'Apa yang dinilai pewawancara'] },\n      { section: '2. Kerangka STAR', contents: ['Penjelasan STAR', 'Mengubah pengalaman organisasi menjadi cerita', 'Lembar latihan STAR'] },\n      { section: '3. 50 pertanyaan umum', contents: ['Pertanyaan tentang diri sendiri', 'Pertanyaan perilaku', 'Pertanyaan motivasi dan ekspektasi gaji'] },\n      { section: '4. Persiapan akhir', contents: ['Riset perusahaan', 'Pertanyaan untuk pewawancara', 'Checklist H-1'] },\n    ],\n    suggested_price_idr: 49000,\n    pricing_rationale: 'Harga terjangkau untuk mahasiswa dan fresh graduate, di bagian bawah rentang harga. Perlu divalidasi dengan penjualan nyata.',\n    sales_copy: {\n      headline: 'Datang ke wawancara dengan jawaban yang sudah dilatih',\n      body: 'Workbook Siap Wawancara membantu Anda menyusun jawaban untuk 50 pertanyaan yang sering muncul, memakai kerangka STAR agar pengalaman organisasi dan magang terdengar jelas. Isi lembar latihannya, baca contoh jawaban beranotasi, lalu gunakan checklist H-1 agar persiapan lengkap.',\n      bullet_points: ['50 pertanyaan dengan ruang latihan', 'Kerangka STAR dan contoh beranotasi', 'Checklist persiapan H-1'],\n      call_to_action: 'Unduh workbook dan mulai latihan hari ini.',\n    },\n  },\n  sponsor: {\n    title: 'Paket Template Proposal Sponsorship untuk Event Kampus',\n    subtitle: 'Proposal, paket benefit, email penawaran, dan tracker sponsor dalam satu paket',\n    description: 'Paket template untuk panitia event kampus yang perlu mencari sponsor dengan cepat. Berisi template proposal yang dapat diedit di Canva dan Google Docs, contoh struktur paket benefit, template email penawaran berbahasa formal, dan tracker sponsor untuk memantau tindak lanjut setiap perusahaan yang dihubungi.',\n    customer_benefits: ['Proposal tersusun lebih cepat dan rapi', 'Paket benefit lebih jelas bagi calon sponsor', 'Tindak lanjut sponsor terpantau dalam satu tracker', 'Mudah diwariskan ke kepengurusan berikutnya'],\n    deliverables: [\n      { name: 'Template proposal', format: 'Canva dan Google Docs', details: '2 gaya desain dengan bagian latar belakang, profil event, audiens, dan paket benefit.' },\n      { name: 'Template email dan pesan penawaran', format: 'Google Docs', details: 'Email pembuka, follow-up, dan ucapan terima kasih.' },\n      { name: 'Tracker sponsor', format: 'Google Sheets', details: 'Status kontak, tanggal follow-up, dan nilai sponsor.' },\n    ],\n    outline: [\n      { section: '1. Persiapan sebelum menulis', contents: ['Menentukan target sponsor', 'Mengumpulkan data event', 'Menyusun anggaran kebutuhan'] },\n      { section: '2. Menyusun proposal', contents: ['Struktur proposal', 'Menulis profil event dan audiens', 'Merancang paket benefit'] },\n      { section: '3. Menghubungi sponsor', contents: ['Template email pembuka', 'Jadwal follow-up', 'Menyiapkan presentasi singkat'] },\n      { section: '4. Setelah kesepakatan', contents: ['Laporan pertanggungjawaban sponsor', 'Ucapan terima kasih', 'Arsip untuk kepengurusan berikutnya'] },\n    ],\n    suggested_price_idr: 59000,\n    pricing_rationale: 'Dapat dibeli patungan oleh panitia; berada di bagian bawah-tengah rentang harga. Perlu divalidasi dengan penjualan nyata.',\n    sales_copy: {\n      headline: 'Susun proposal sponsorship tanpa mulai dari halaman kosong',\n      body: 'Paket ini memberi panitia template proposal, contoh paket benefit, template email penawaran, dan tracker sponsor. Edit di Canva atau Google Docs, sesuaikan dengan event Anda, lalu pantau setiap sponsor yang dihubungi di satu spreadsheet.',\n      bullet_points: ['Template proposal 2 gaya desain', 'Template email penawaran dan follow-up', 'Tracker sponsor di Google Sheets'],\n      call_to_action: 'Dapatkan paket template dan mulai hubungi sponsor lebih cepat.',\n    },\n  },\n};\nconst t = String(sel.title || '').toLowerCase();\nlet product;\nif (t.indexOf('sop') !== -1) product = library.sop;\nelse if (t.indexOf('wawancara') !== -1) product = library.interview;\nelse if (t.indexOf('sponsor') !== -1) product = library.sponsor;\nelse product = {\n  title: sel.title,\n  subtitle: sel.proposed_solution,\n  description: sel.customer_problem + ' ' + sel.proposed_solution + ' ' + sel.differentiation,\n  customer_benefits: [],\n  deliverables: [],\n  outline: [],\n  suggested_price_idr: sel.suggested_price_idr,\n  pricing_rationale: sel.rationale,\n  sales_copy: { headline: sel.title, body: sel.proposed_solution, bullet_points: [], call_to_action: '' },\n};\nproduct = Object.assign({}, product, { target_audience: sel.target_audience, draft_label: DRAFT });\n\nreturn [{ json: {\n  product: product,\n  product_ok: true,\n  product_source: 'simulation_sample',\n  openai_status_product: 'not_called: simulation mode (no external API call)',\n  ai_calls_product: 0,\n  product_errors: [],\n} }];"
+      },
+      "id": "2f274331-9dcf-4dfb-9438-d7c6bfd1bbc9",
+      "name": "Generate Sample Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3440,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// SIMULATION ONLY: realistic sample ideas; never calls an external API and never claims demand is validated.\nconst cfg = $('Validate Configuration').first().json.config;\nconst ideas = [\n  {\n    title: 'Kit SOP Admin Online Shop: Template Operasional Siap Edit',\n    target_audience: 'Pemilik online shop Indonesia yang memiliki 1-5 admin dan menjual melalui marketplace atau WhatsApp',\n    customer_problem: 'Pemilik toko sering mengulangi instruksi kepada admin baru dan menghadapi jawaban chat yang tidak konsisten, pesanan yang salah diproses, serta checklist harian yang tidak terdokumentasi.',\n    proposed_solution: 'Paket template SOP siap edit, skrip balasan pelanggan, checklist harian Google Sheets, dan panduan implementasi bertahap untuk alur pesanan, stok, komplain, retur, dan serah terima shift.',\n    differentiation: 'Menggunakan Bahasa Indonesia dan konteks alur Shopee, Tokopedia, TikTok Shop, serta WhatsApp; pemilik dapat menyesuaikan dokumen tanpa aplikasi khusus.',\n    suggested_price_idr: 79000,\n    rationale: 'Nilainya terletak pada dokumen operasional siap edit yang menghemat waktu penyusunan SOP. Harga masih usulan dan harus diuji melalui umpan balik serta transaksi nyata.'\n  },\n  {\n    title: 'Template Invoice & Pembukuan Sederhana untuk UMKM',\n    target_audience: 'Pemilik UMKM yang masih mencatat transaksi secara manual',\n    customer_problem: 'Pencatatan penjualan dan tagihan berantakan sehingga sulit mengetahui laba rugi bulanan.',\n    proposed_solution: 'Template spreadsheet invoice, buku kas harian, dan laporan laba-rugi sederhana.',\n    differentiation: 'Format Rupiah dan istilah akuntansi dasar dalam Bahasa Indonesia.',\n    suggested_price_idr: 39000,\n    rationale: 'Sample idea untuk mengecek aturan duplikasi; belum ada validasi pasar.'\n  },\n  {\n    title: 'Workbook Persiapan Wawancara Kerja untuk Fresh Graduate',\n    target_audience: 'Fresh graduate dan mahasiswa tingkat akhir Indonesia yang melamar pekerjaan pertama',\n    customer_problem: 'Pelamar kesulitan menyusun jawaban wawancara yang jelas dari pengalaman organisasi, magang, dan kuliah.',\n    proposed_solution: 'Workbook PDF dengan latihan STAR, daftar pertanyaan, contoh jawaban beranotasi, dan checklist H-1.',\n    differentiation: 'Contoh konteks organisasi kampus dan proses rekrutmen Indonesia.',\n    suggested_price_idr: 49000,\n    rationale: 'Memberikan kerangka latihan terstruktur; harga dan minat pembeli belum tervalidasi.'\n  },\n  {\n    title: 'Paket Template Proposal Sponsorship Event Kampus',\n    target_audience: 'Panitia event dan organisasi mahasiswa yang mencari sponsor',\n    customer_problem: 'Panitia sering membuat proposal dari nol dan sulit memantau tindak lanjut sponsor.',\n    proposed_solution: 'Template proposal, email penawaran, tabel paket benefit, dan tracker sponsor spreadsheet.',\n    differentiation: 'Disesuaikan untuk event kampus Indonesia dan bahasa formal ke perusahaan lokal.',\n    suggested_price_idr: 59000,\n    rationale: 'Membantu menyiapkan dokumen lebih cepat; harga perlu divalidasi dengan pembeli nyata.'\n  }\n].slice(0, Math.max(1, Math.min(5, Number(cfg.max_ideas) || 1)));\nreturn [{ json: { ideas, idea_source: 'simulation_sample', openai_status_ideas: 'not_called: simulation mode; no external API call', ai_calls_ideas: 0, idea_errors: [] } }];"
+      },
+      "id": "fa9f2509-6b82-47de-9c9f-9301526ff837",
+      "name": "Generate Sample Ideas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1696,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Build downloadable product material and a sales-page HTML draft without any AI/API call.\nconst qa = $input.first().json || {};\nconst p = qa.product || {};\nconst cfg = $('Validate Configuration').first().json.config;\nconst productContent = p.product_content || {};\nconst chapters = Array.isArray(productContent.chapters) ? productContent.chapters : [];\nconst templates = Array.isArray(productContent.templates) ? productContent.templates : [];\nconst outline = Array.isArray(p.outline) ? p.outline : [];\nconst sales = p.sales_copy || {};\nconst simulation = cfg.run_mode === 'simulation' || String(p.draft_label || '').toLowerCase().includes('simulation');\nfunction esc(v) { return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;'); }\nfunction slug(v) { return String(v || 'lynkfusion-product').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,60) || 'lynkfusion-product'; }\nfunction rupiah(v) { const n = Number(v); return Number.isFinite(n) ? 'Rp' + Math.round(n).toLocaleString('id-ID') : 'Harga belum ditentukan'; }\nconst safeTitle = String(p.title || 'LynkFusion Product Draft');\nconst label = simulation ? 'SIMULATION SAMPLE — not for sale; contains sample/demo content.' : (p.draft_label || 'DRAFT — review and approve before sale.');\nconst md = [];\nmd.push('# ' + safeTitle, '', '> ' + label, '', (p.subtitle || ''), '', '## Deskripsi', '', (p.description || ''), '', '## Target pengguna', '', (p.target_audience || ''), '', '## Manfaat', '');\nfor (const b of (Array.isArray(p.customer_benefits) ? p.customer_benefits : [])) md.push('- ' + b);\nmd.push('', '## Isi produk dan file yang termasuk', '');\nfor (const x of (Array.isArray(p.deliverables) ? p.deliverables : [])) md.push('### ' + (x.name || 'Deliverable'), '', '**Format:** ' + (x.format || 'Belum ditentukan'), '', (x.details || ''), '');\nif (productContent.introduction) md.push('## Pengantar', '', productContent.introduction, '');\nif (chapters.length) {\n  md.push('## Materi lengkap', '');\n  for (const c of chapters) md.push('### ' + (c.title || 'Bab'), '', (c.content || ''), '');\n} else {\n  md.push('## Kerangka materi (sample/outline; belum menjadi materi lengkap)', '');\n  for (const s of outline) { md.push('### ' + (s.section || 'Bagian'), ''); for (const item of (Array.isArray(s.contents) ? s.contents : [])) md.push('- ' + item); md.push(''); }\n}\nif (templates.length) { md.push('## Template / worksheet', ''); for (const t of templates) md.push('### ' + (t.name || 'Template'), '', (t.content || ''), ''); }\nif (productContent.usage_instructions) md.push('## Cara menggunakan produk', '', productContent.usage_instructions, '');\nmd.push('## Harga usulan', '', rupiah(p.suggested_price_idr), '', p.pricing_rationale || 'Harga belum divalidasi melalui transaksi nyata.', '', '## Copywriting penjualan', '', '### ' + (sales.headline || safeTitle), '', (sales.body || p.description || ''), '');\nfor (const b of (Array.isArray(sales.bullet_points) ? sales.bullet_points : [])) md.push('- ' + b);\nif (sales.call_to_action) md.push('', '**CTA:** ' + sales.call_to_action);\nmd.push('', '---', '', 'Status: ' + label, 'Catatan: QA otomatis tidak membuktikan permintaan pasar, hak cipta, atau potensi penjualan. Periksa akurasi dan hak penggunaan sebelum dijual.');\nconst markdown = md.join('\\n');\nconst chapterHtml = chapters.length ? chapters.map(c => '<section><h2>' + esc(c.title) + '</h2><p>' + esc(c.content).replace(/\\n/g,'<br>') + '</p></section>').join('\\n') : outline.map(s => '<section><h2>' + esc(s.section) + '</h2><ul>' + (Array.isArray(s.contents)?s.contents:[]).map(x => '<li>'+esc(x)+'</li>').join('') + '</ul></section>').join('\\n');\nconst benefitsHtml = (Array.isArray(p.customer_benefits)?p.customer_benefits:[]).map(x => '<li>'+esc(x)+'</li>').join('');\nconst deliverablesHtml = (Array.isArray(p.deliverables)?p.deliverables:[]).map(x => '<li><strong>'+esc(x.name)+'</strong> ('+esc(x.format)+') — '+esc(x.details)+'</li>').join('');\nconst bulletsHtml = (Array.isArray(sales.bullet_points)?sales.bullet_points:[]).map(x => '<li>'+esc(x)+'</li>').join('');\nconst html = '<!doctype html><html lang=\"id\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>'+esc(safeTitle)+'</title><style>body{font:16px/1.65 system-ui,Arial,sans-serif;max-width:850px;margin:0 auto;padding:28px;color:#20242a}header{padding:26px 0;border-bottom:1px solid #ddd}h1{line-height:1.2}h2{margin-top:32px} .notice{padding:12px;border:1px solid #999;border-radius:8px;font-weight:600} .price{font-size:1.5rem;font-weight:700}section{margin:24px 0}li{margin:6px 0}.cta{font-weight:700;margin-top:24px}</style></head><body><div class=\"notice\">'+esc(label)+'</div><header><h1>'+esc(sales.headline || safeTitle)+'</h1><p>'+esc(p.subtitle || '')+'</p><p>'+esc(sales.body || p.description || '')+'</p><div class=\"price\">'+esc(rupiah(p.suggested_price_idr))+'</div></header><section><h2>Tentang produk</h2><p>'+esc(p.description || '')+'</p><p><strong>Untuk:</strong> '+esc(p.target_audience || '')+'</p></section><section><h2>Manfaat</h2><ul>'+benefitsHtml+'</ul></section><section><h2>Yang didapat</h2><ul>'+deliverablesHtml+'</ul></section><section><h2>Materi produk</h2>'+chapterHtml+'</section>'+(templates.length?'<section><h2>Template / worksheet</h2>'+templates.map(t=>'<h3>'+esc(t.name)+'</h3><p>'+esc(t.content).replace(/\\n/g,'<br>')+'</p>').join('')+'</section>':'')+(productContent.usage_instructions?'<section><h2>Cara menggunakan</h2><p>'+esc(productContent.usage_instructions).replace(/\\n/g,'<br>')+'</p></section>':'')+'<section><h2>Ringkasan</h2><ul>'+bulletsHtml+'</ul><p class=\"cta\">'+esc(sales.call_to_action || 'Lihat detail produk di halaman penjualan.')+'</p></section><footer><p><small>Harga usulan, belum tervalidasi dengan transaksi nyata. Periksa konten, lisensi, dan kelayakan sebelum dipublikasikan.</small></p></footer></body></html>';\nconst base = slug(safeTitle);\nconst mdBinary = await this.helpers.prepareBinaryData(Buffer.from(markdown, 'utf8'), base + (simulation ? '-SAMPLE.md' : '.md'), 'text/markdown');\nconst htmlBinary = await this.helpers.prepareBinaryData(Buffer.from(html, 'utf8'), base + '-sales-page.html', 'text/html');\nreturn [{ json: Object.assign({}, qa, { product_files_ready: !!p.title, product_file_names: [mdBinary.fileName, htmlBinary.fileName], product_file_status: simulation ? 'sample_only_not_for_sale' : 'draft_for_owner_review' }), binary: { product_markdown: mdBinary, sales_page_html: htmlBinary } }];"
+      },
+      "id": "86acb140-5179-40db-8231-6bf2cc72a81a",
+      "name": "Build Product Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5232,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "only-live-persist",
+              "leftValue": "={{ $('Validate Configuration').first().json.config.run_mode }}",
+              "rightValue": "live",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8dd665d8-c644-4b11-ae38-9025ef84f304",
+      "name": "Live Persistence Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5456,
+        416
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Start LynkFusion Run": {
+      "main": [
+        [
+          {
+            "node": "Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration": {
+      "main": [
+        [
+          {
+            "node": "Validate Configuration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Configuration": {
+      "main": [
+        [
+          {
+            "node": "Config Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config Valid?": {
+      "main": [
+        [
+          {
+            "node": "Load Existing Products",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Existing Products": {
+      "main": [
+        [
+          {
+            "node": "Prepare Existing Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Existing Records": {
+      "main": [
+        [
+          {
+            "node": "Live Mode for Ideas?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live Mode for Ideas?": {
+      "main": [
+        [
+          {
+            "node": "Groq Generate Ideas",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Sample Ideas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Generate Ideas": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Ideas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Ideas": {
+      "main": [
+        [
+          {
+            "node": "Detect Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Duplicates": {
+      "main": [
+        [
+          {
+            "node": "Score & Select Idea",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score & Select Idea": {
+      "main": [
+        [
+          {
+            "node": "Valid Candidate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Candidate?": {
+      "main": [
+        [
+          {
+            "node": "Live Mode for Product?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live Mode for Product?": {
+      "main": [
+        [
+          {
+            "node": "Groq Create Product Draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Sample Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Create Product Draft": {
+      "main": [
+        [
+          {
+            "node": "Parse Product Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Product Draft": {
+      "main": [
+        [
+          {
+            "node": "Claude Review Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Review Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Claude Independent Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Quality Assurance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Independent Review": {
+      "main": [
+        [
+          {
+            "node": "Parse Claude Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Claude Review": {
+      "main": [
+        [
+          {
+            "node": "Revision Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Revision Allowed?": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Final Revision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Quality Assurance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Final Revision": {
+      "main": [
+        [
+          {
+            "node": "Apply Final Revision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Final Revision": {
+      "main": [
+        [
+          {
+            "node": "Quality Assurance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Assurance": {
+      "main": [
+        [
+          {
+            "node": "Build Product Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Product Record": {
+      "main": [
+        [
+          {
+            "node": "QA Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QA Passed?": {
+      "main": [
+        [
+          {
+            "node": "Wait for Owner Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Owner Approval": {
+      "main": [
+        [
+          {
+            "node": "Record Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Approval Decision": {
+      "main": [
+        [
+          {
+            "node": "Update Approval Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Approval Status": {
+      "main": [
+        [
+          {
+            "node": "Build Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Sample Product": {
+      "main": [
+        [
+          {
+            "node": "Claude Review Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Sample Ideas": {
+      "main": [
+        [
+          {
+            "node": "Detect Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Product Files": {
+      "main": [
+        [
+          {
+            "node": "Live Persistence Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Live Persistence Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Save Product Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Final Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "tags": []
+}
